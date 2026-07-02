@@ -2,8 +2,7 @@ use std::env;
 use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use wasmer::{Instance, Module, Store, Value};
-use wasmer_wasi::WasiState; // WASI 用のインポートを追加
+use wasmer::{Instance, Module, Store, Value, imports};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Hyprland のソケット2 のパスを特定
@@ -27,10 +26,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("Failed to read plugin.wasm. Did you build it in the parent directory?");
     let module = Module::new(&store, wasm_bytes)?;
 
-    let mut wasi_env = WasiState::new("hyprland-plugin").finalize(&mut store)?;
-    let import_object = wasi_env.import_object(&mut store, &module)?;
-
-    // 空の imports! {} ではなく、WASI の関数が含まれた import_object を使う
+    // 💡 空のインポートオブジェクトで完全に独立して動かす
+    let import_object = imports! {};
     let instance = Instance::new(&mut store, &module, &import_object)?;
 
     // Wasm 内の関数を取り出す
