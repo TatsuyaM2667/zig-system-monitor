@@ -51,25 +51,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Connected! Monitoring Hyprland events via Wasm plugin...\n");
 
     // 4. ソケットからリアルタイムにイベント行を読み込むループ
+    // 4. ソケットからリアルタイムにイベント行を読み込むループ
     for line_result in reader.lines() {
         let line = line_result?;
         if line.is_empty() {
             continue;
         }
 
-        // --- Wasm の檻（メモリ）に文字列を流し込む処理 ---
         let input_bytes = line.as_bytes();
         let input_len = input_bytes.len() as i32;
 
-        // Wasm 側のメモリを確保
+        // Wasm 側のメモリを確保 (input文字列用)
         let alloc_args = vec![Value::I32(input_len)];
         let alloc_res = alloc_fn.call(&mut store, &alloc_args)?;
         let wasm_ptr = alloc_res[0].i32().unwrap();
+
+        // 【スコープ1】input 文字列の書き込み
         {
-            // 確保した Wasm メモリに Rust 側の文字列を書き込む
             let view = memory.view(&store);
             view.write(wasm_ptr as u64, input_bytes)?;
         }
+
         // Wasm 側から戻り値（Response構造体）を書き込んでもらうための領域（8バイト分）を確保
         let ret_alloc_args = vec![Value::I32(8)];
         let ret_alloc_res = alloc_fn.call(&mut store, &ret_alloc_args)?;
@@ -83,11 +85,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ];
         format_fn.call(&mut store, &format_args)?;
 
-        let mut response_buf = [0u8; 8];
+        // 【スコープ2】Responseの読み出しから、文字列の復元までを全部この中で行う！
         let mut result_buf = Vec::new();
         let mut res_len = 0u32;
         {
             let view = memory.view(&store);
+
+            let mut response_buf = [0u8; 8];
             view.read(ret_ptr as u64, &mut response_buf)?;
 
             let res_ptr = u32::from_le_bytes(response_buf[0..4].try_into().unwrap());
@@ -97,14 +101,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 result_buf = vec![0u8; res_len as usize];
                 view.read(res_ptr as u64, &mut result_buf)?;
             }
-        } // ここ
-        // 加工された文字列の本体を Wasm メモリから読み出して Rust の String に復元
-        if res_len > 0 {
-            let mut result_buf = vec![0u8; res_len as usize];
-            view.read(res_ptr as u64, &mut result_buf)?;
-            let formatted_str = String::from_utf8_lossy(&result_buf);
+        } // ここで view と res_ptr の寿命が安全に終わる
 
-            // 画面に出力！
+        // 画面に出力 (外側では安全にコピーされた Vec のデータを使う)
+        if res_len > 0 {
+            let formatted_str = String::from_utf8_lossy(&result_buf);
             println!("{}", formatted_str);
         }
 
