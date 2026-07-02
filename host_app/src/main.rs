@@ -65,11 +65,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let alloc_args = vec![Value::I32(input_len)];
         let alloc_res = alloc_fn.call(&mut store, &alloc_args)?;
         let wasm_ptr = alloc_res[0].i32().unwrap();
-
-        // 確保した Wasm メモリに Rust 側の文字列を書き込む
-        let view = memory.view(&store);
-        view.write(wasm_ptr as u64, input_bytes)?;
-
+        {
+            // 確保した Wasm メモリに Rust 側の文字列を書き込む
+            let view = memory.view(&store);
+            view.write(wasm_ptr as u64, input_bytes)?;
+        }
         // Wasm 側から戻り値（Response構造体）を書き込んでもらうための領域（8バイト分）を確保
         let ret_alloc_args = vec![Value::I32(8)];
         let ret_alloc_res = alloc_fn.call(&mut store, &ret_alloc_args)?;
@@ -83,13 +83,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ];
         format_fn.call(&mut store, &format_args)?;
 
-        // 書き込まれた Response 構造体（ポインタ 4バイト + 長さ 4バイト）を Wasm メモリから読み出す
         let mut response_buf = [0u8; 8];
-        view.read(ret_ptr as u64, &mut response_buf)?;
+        let mut result_buf = Vec::new();
+        let mut res_len = 0u32;
+        {
+            let view = memory.view(&store);
+            view.read(ret_ptr as u64, &mut response_buf)?;
 
-        let res_ptr = u32::from_le_bytes(response_buf[0..4].try_into().unwrap());
-        let res_len = u32::from_le_bytes(response_buf[4..8].try_into().unwrap());
+            let res_ptr = u32::from_le_bytes(response_buf[0..4].try_into().unwrap());
+            res_len = u32::from_le_bytes(response_buf[4..8].try_into().unwrap());
 
+            if res_len > 0 {
+                result_buf = vec![0u8; res_len as usize];
+                view.read(res_ptr as u64, &mut result_buf)?;
+            }
+        } // ここ
         // 加工された文字列の本体を Wasm メモリから読み出して Rust の String に復元
         if res_len > 0 {
             let mut result_buf = vec![0u8; res_len as usize];
