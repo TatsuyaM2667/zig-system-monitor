@@ -2,19 +2,11 @@ use std::env;
 use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use wasmer::{Instance, Module, Store, Value, imports};
-
-// Zig 側とメモリ配置を完全に合わせるための構造体
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-struct WasmResponse {
-    ptr: u32,
-    len: u32,
-}
+use wasmer::{Instance, Module, Store, Value};
+use wasmer_wasi::WasiState; // WASI 用のインポートを追加
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Hyprland のソケット2 (.socket2.sock) のパスを環境変数から特定する
-    // 通常は /run/user/1000/hypr/<HIS>/.socket2.sock にあります
+    // 1. Hyprland のソケット2 のパスを特定
     let xdg_runtime_dir = env::var("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/run/user/1000"));
@@ -31,11 +23,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. Wasmer の初期化と plugin.wasm の読み込み
     let mut store = Store::default();
-    // 1つ上の階層（プロジェクトルート）にある plugin.wasm を読み込む
     let wasm_bytes = std::fs::read("../plugin.wasm")
         .expect("Failed to read plugin.wasm. Did you build it in the parent directory?");
     let module = Module::new(&store, wasm_bytes)?;
-    let import_object = imports! {};
+
+    let mut wasi_env = WasiState::new("hyprland-plugin").finalize(&mut store)?;
+    let import_object = wasi_env.import_object(&mut store, &module)?;
+
+    // 空の imports! {} ではなく、WASI の関数が含まれた import_object を使う
     let instance = Instance::new(&mut store, &module, &import_object)?;
 
     // Wasm 内の関数を取り出す
@@ -51,7 +46,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Connected! Monitoring Hyprland events via Wasm plugin...\n");
 
     // 4. ソケットからリアルタイムにイベント行を読み込むループ
-    // 4. ソケットからリアルタイムにイベント行を読み込むループ
     for line_result in reader.lines() {
         let line = line_result?;
         if line.is_empty() {
@@ -61,23 +55,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let input_bytes = line.as_bytes();
         let input_len = input_bytes.len() as i32;
 
-        // Wasm 側のメモリを確保 (input文字列用)
+        // Wasm 側のメモリを確保
         let alloc_args = vec![Value::I32(input_len)];
         let alloc_res = alloc_fn.call(&mut store, &alloc_args)?;
         let wasm_ptr = alloc_res[0].i32().unwrap();
 
-        // 【スコープ1】input 文字列の書き込み
+        // input 文字列の書き込み
         {
             let view = memory.view(&store);
             view.write(wasm_ptr as u64, input_bytes)?;
         }
 
-        // Wasm 側から戻り値（Response構造体）を書き込んでもらうための領域（8バイト分）を確保
+        // 戻り値格納用（8バイト分）を確保
         let ret_alloc_args = vec![Value::I32(8)];
         let ret_alloc_res = alloc_fn.call(&mut store, &ret_alloc_args)?;
         let ret_ptr = ret_alloc_res[0].i32().unwrap();
 
-        // Wasm の関数を実行 (引数: 入力ポインタ, 入力長さ, 戻り値格納用ポインタ)
+        // Wasm の関数を実行
         let format_args = vec![
             Value::I32(wasm_ptr),
             Value::I32(input_len),
@@ -85,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ];
         format_fn.call(&mut store, &format_args)?;
 
-        // 【スコープ2】Responseの読み出しから、文字列の復元までを全部この中で行う！
+        // Responseの読み出しから、文字列の復元まで
         let mut result_buf = Vec::new();
         let mut res_len = 0u32;
         {
@@ -101,15 +95,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 result_buf = vec![0u8; res_len as usize];
                 view.read(res_ptr as u64, &mut result_buf)?;
             }
-        } // ここで view と res_ptr の寿命が安全に終わる
+        }
 
-        // 画面に出力 (外側では安全にコピーされた Vec のデータを使う)
+        // 画面に出力
         if res_len > 0 {
             let formatted_str = String::from_utf8_lossy(&result_buf);
             println!("{}", formatted_str);
         }
 
-        // メモリリークを防ぐため、今回使った Wasm 側のメモリを解放
+        // メモリ解放
         free_fn.call(
             &mut store,
             &vec![Value::I32(wasm_ptr), Value::I32(input_len)],

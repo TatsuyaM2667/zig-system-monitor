@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 wasmer = "7.2.0"
+wasmer-wasi = "7.2.0"
