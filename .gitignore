@@ -1,0 +1,17 @@
+
+*.wasm
+plugin
+
+
+.zig-cache/
+zig-out/
+
+
+host_app/target/
+
+.zed/
+.vscode/
+
+
+*.swp
+*~
